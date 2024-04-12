@@ -1,0 +1,494 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: "Creates log consumer for forwarding logs to siem"
+
+Parameters:
+  SecurityGroupId :
+    Type: String
+    Description: "Security Group for Splunk VPC" 
+  VPCSubnetIdList:
+    Description: "List of subnets belongin to the Product VPC"
+    Type: CommaDelimitedList
+  #Lambda Parameters
+  LambdaFunctionRoleArn:
+    Type: String
+    Description: "Lambda role arn"
+  FunctionRuntime:
+    Description: "Runtime to be used in the lambda function"
+    Type: String
+    AllowedValues:
+      - "python3.8"
+      - "python3.9"
+      - "python3.10"
+  SplunkUrl:
+    Type: String
+    Description: "Url for the SIEM Endpoint"
+  LogingBucketName:
+    Type: String
+    Description: "Logging bucket name to imported into the stack"
+    Default: "Teste"
+  #Tag Parameters 
+  TeamContactEmail:
+    Type: String
+    Description: "Tech team e-mail"
+    Default:
+  TagComunityKey:
+    Type: String 
+    Description: "Tag key for enabler squad resources"
+    Default:
+TagComunityValue: 
+    Type: String 
+    Description: "Tag value for enabler squad resources"
+    Default: cloudsecops 
+  OrganizationName: 
+    Type: String
+    Description: "Organization name where resources will be created at"
+    AllowedValues:
+  ServiceName: 
+    Type: String
+    Description: "Define the service from where the logs will be consumed"
+  Environment: 
+    Type: String
+    Description: "Define which environment resources will be created"
+    AllowedValues:
+      - "dev"
+      - "hom"
+      - "pro"
+      - "too"
+  DataClassification:
+    Type: String
+    AllowedValues:
+      - "internal" 
+      - "confidential"  
+
+Resources:
+  #KMS Block
+  KMSkey: 
+    Type: AWS::KMS::Key
+    Properties: 
+      KeyPolicy:
+        Fn::Sub: 
+          - |
+              {
+                "Version": "2012-10-17",
+                "Id": "po7-send-logs-to-siem-kms-cmk",
+                "Statement": [
+                  {
+                    "Sid": "Allow access through AWS Services to the specific Customer Key",
+                    "Effect": "Allow",
+                    "Principal": {
+                      "AWS": "${AccountId}"
+                    },
+                    "Action": [
+                      "kms:Encrypt",
+                      "kms:Decrypt",
+                      "kms:ReEncrypt*",
+                      "kms:CreateGrant",
+                      "kms:DescribeKey",
+                      "kms:GenerateDataKey",
+                      "kms:TagResource",
+                      "kms:UntagResource"
+                    ],
+                    "Resource": "*",
+                    "Condition": {
+                      "StringEquals": {
+                        "kms:ViaService": [
+                          "secretsmanager.${Region}.amazonaws.com",
+                          "lambda.${Region}.amazonaws.com",
+                          "sqs.${Region}.amazonaws.com"
+                        ],
+                        "kms:CallerAccount": "${AccountId}"
+                      }
+                    }
+                  },
+                  {
+                    "Sid": "Allow s3 bucket to use log consumer kms cmk",
+                    "Effect": "Allow",
+                    "Principal": {
+                      "Service": "s3.amazonaws.com"
+                    },
+                    "Action": [
+                      "kms:GenerateDataKey",
+                      "kms:Decrypt"
+                    ],
+                    "Resource": "*"
+                  },
+                  {
+                    "Sid": "Allow AWS account users to read and remove grants from the cmk",
+                    "Effect": "Allow",
+                    "Principal": {
+                      "AWS": "${AccountId}"
+                    },
+                    "Action": [
+                      "kms:Get*",
+                      "kms:List*",
+                      "kms:Describe*",
+                      "kms:RevokeGrant",
+                      "kms:PutKeyPolicy",
+                      "kms:DisableKey",
+                      "kms:ScheduleKeyDeletion",
+                      "kms:Create*",
+                      "kms:ListAliases",
+                      "kms:UpdateAlias",
+                      "kms:Delete*",
+                      "kms:TagResource",
+                      "kms:UntagResource"
+                    ],
+                    "Resource": "*",
+                    "Condition": {
+                      "StringEquals": {
+                        "kms:CallerAccount": "${AccountId}"
+                      }
+                    }
+                  }
+                ]
+              }
+          -
+           Region: !Sub ${AWS::Region}
+           AccountId: !Sub ${AWS::AccountId}
+      Tags:
+        - Key: "kms_type"
+          Value: "internal"
+        - Key: service
+          Value:
+            Fn::Sub:
+              - "${OrganizationName}-${Environment}-${ServiceName}-logs-to-siem" 
+              - 
+                OrganizationName: !Ref OrganizationName
+                Environment: !Ref Environment
+                ServiceName: !Ref ServiceName
+        - Key: tech-team-email
+          Value: !Ref TeamContactEmail
+        - Key: team-contact-email
+          Value: !Ref TeamContactEmail
+        # - Key: !Ref TagComunityKey
+        #   Value: !Ref TagComunityValue
+  MyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: 
+        Fn::Sub: 
+            - "alias/${OrganizationName}-${Environment}-${ServiceName}-logs-encryption-key"
+            - 
+              OrganizationName: !Ref OrganizationName
+              Environment: !Ref Environment
+              ServiceName: !Ref ServiceName
+      TargetKeyId: !GetAtt  KMSkey.Arn  
+  #SQS Block
+  ConsumerQueueSQS:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: 
+        Fn::Sub: 
+            - "${OrganizationName}-${Environment}-${ServiceName}-logs-consumer-queue"
+            - 
+              OrganizationName: !Ref OrganizationName
+              Environment: !Ref Environment
+              ServiceName: !Ref ServiceName 
+      KmsMasterKeyId: !GetAtt KMSkey.KeyId
+      KmsDataKeyReusePeriodSeconds: 3600
+      MessageRetentionPeriod: 345600
+      ReceiveMessageWaitTimeSeconds: 20
+      VisibilityTimeout: 900 
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DeadLetterQueueSQS.Arn
+        maxReceiveCount: 5
+      Tags:
+        - Key: sqs_data_classification
+          Value: !Ref DataClassification
+        - Key: OrganizationName
+          Value:
+            Fn::Sub:
+              - "${OrganizationName}-${Environment}-${ServiceName}-logs-to-siem" 
+              - 
+                OrganizationName: !Ref OrganizationName
+                Environment: !Ref Environment
+                ServiceName: !Ref ServiceName
+        - Key: tech-team-email
+          Value: !Ref TeamContactEmail
+        - Key: team-contact-email
+          Value: !Ref TeamContactEmail
+  DeadLetterQueueSQS:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: 
+        Fn::Sub: 
+            - "${OrganizationName}-${Environment}-${ServiceName}-logs-consumer-dead-letter-queue"
+            - 
+              OrganizationName: !Ref OrganizationName
+              Environment: !Ref Environment
+              ServiceName: !Ref ServiceName 
+      KmsMasterKeyId: !GetAtt KMSkey.KeyId
+      KmsDataKeyReusePeriodSeconds: 3600
+      MessageRetentionPeriod: 345600
+      ReceiveMessageWaitTimeSeconds: 20 
+      VisibilityTimeout: 900 
+      RedriveAllowPolicy:
+          Fn::Sub: 
+            - | 
+              {"redrivePermission":"byQueue","sourceQueueArns":["arn:aws:sqs:${Region}:${AccountId}:${OrganizationName}-${Environment}-${ServiceName}-logs-consumer-queue"]}
+            - 
+              OrganizationName: !Ref OrganizationName
+              Environment: !Ref Environment
+              ServiceName: !Ref ServiceName
+              Region: !Sub ${AWS::Region}
+              AccountId: !Sub ${AWS::AccountId}
+      Tags:
+        - Key: sqs_data_classification
+          Value: !Ref DataClassification
+        - Key: OrganizationName
+          Value:
+            Fn::Sub:
+              - "${OrganizationName}-${Environment}-${ServiceName}-logs-to-siem" 
+              - 
+                OrganizationName: !Ref OrganizationName
+                Environment: !Ref Environment
+                ServiceName: !Ref ServiceName
+        - Key: tech-team-email
+          Value: !Ref TeamContactEmail
+        - Key: team-contact-email
+          Value: !Ref TeamContactEmail
+    DependsOn: 
+     - MyAlias
+  QueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties: 
+      PolicyDocument: 
+        Fn::Sub:
+          - |
+              {
+                "Version": "2012-10-17",
+                "Id": "po7-send-${OrganizationName}-${Environment}-${ServiceName}-logs-to-siem-sqs-queue",
+                "Statement": [
+                  {
+                    "Sid": "Allow all actions on the Queue by the account users",
+                    "Effect": "Allow",
+                    "Principal": {
+                      "AWS": "${AccountId}"
+                    },
+                    "Action": [
+                      "sqs:*"
+                    ],
+                    "Resource": "arn:aws:sqs:${Region}:${AccountId}:${OrganizationName}-${Environment}-${ServiceName}-logs-consumer-queue",
+                    "Condition": {
+                      "StringEquals": {
+                        "aws:SourceAccount": "${AccountId}"
+                      }
+                    }
+                  },
+                  {
+                    "Sid": "Allows s3 notification over the queue",
+                    "Effect": "Allow",
+                    "Principal": {
+                      "Service": [
+                        "s3.amazonaws.com",
+                        "lambda.amazonaws.com"
+                      ]
+                    },
+                    "Action": [
+                      "SQS:SendMessage",
+                      "SQS:ReceiveMessage"
+                    ],
+                    "Resource": "arn:aws:sqs:${Region}:${AccountId}:${OrganizationName}-${Environment}-${ServiceName}-logs-consumer-queue",
+                    "Condition": {
+                      "StringEquals": {
+                        "aws:SourceAccount": "${AccountId}"
+                      },
+                      "ArnLike": {
+                        "aws:SourceArn": "arn:aws:s3:::${LogingBucketName}"
+                      }
+                    }
+                  }
+                ]
+              }
+          - 
+            OrganizationName: !Ref OrganizationName
+            Environment: !Ref Environment
+            ServiceName: !Ref ServiceName
+            LogingBucketName: !Ref LogingBucketName
+            Region: !Sub ${AWS::Region}
+            AccountId: !Sub ${AWS::AccountId}    
+      Queues: 
+      - !GetAtt ConsumerQueueSQS.QueueUrl
+    DependsOn:
+      - DeadLetterQueueSQS
+  DeadLetterQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties: 
+      PolicyDocument: 
+        Fn::Sub:
+          - |
+              {
+                "Version": "2012-10-17",
+                "Id": "po7-send-${OrganizationName}-${Environment}-${ServiceName}-to-siem-consumer-dead-letter-queue",
+                "Statement": [
+                  {
+                    "Sid": "Allow all actions on the Queue by the account users",
+                    "Effect": "Allow",
+                    "Principal": {
+                      "AWS": "arn:aws:iam::${AccountId}:root"
+                    },
+                    "Action": [
+                      "sqs:*"
+                    ],
+                    "Resource": "arn:aws:sqs:${Region}:${AccountId}:${OrganizationName}-${Environment}-${ServiceName}-logs-consumer-dead-letter-queue",
+                    "Condition": {
+                      "StringEquals": {
+                        "aws:SourceAccount": "${AccountId}"
+                      }
+                    }
+                  },
+                  {
+                    "Sid": "Allows s3 notification over the queue",
+                    "Effect": "Allow",
+                    "Principal": {
+                      "Service": [
+                        "s3.amazonaws.com",
+                        "lambda.amazonaws.com"
+                      ]
+                    },
+                    "Action": [
+                      "SQS:SendMessage",
+                      "SQS:ReceiveMessage"
+                    ],
+                    "Resource": "arn:aws:sqs:${Region}:${AccountId}:${OrganizationName}-${Environment}-${ServiceName}-logs-consumer-dead-letter-queue",
+                    "Condition": {
+                      "StringEquals": {
+                        "aws:SourceAccount": "${AccountId}"
+                      },
+                      "ArnLike": {
+                        "aws:SourceArn": "arn:aws:s3:::${LogingBucketName}"
+                      }
+                    }
+                  }
+                ]
+              }
+          - 
+            OrganizationName: !Ref OrganizationName
+            Environment: !Ref Environment
+            ServiceName: !Ref ServiceName
+            LogingBucketName: !Ref LogingBucketName
+            Region: !Sub ${AWS::Region}
+            AccountId: !Sub ${AWS::AccountId}    
+      Queues: 
+      - !GetAtt DeadLetterQueueSQS.QueueUrl
+
+  #Secrets Manager Block
+  Secret:
+    Type: AWS::SecretsManager::Secret
+    Properties: 
+      Name: 
+        Fn::Sub:         
+            - "${OrganizationName}-${Environment}-${ServiceName}-logs-lambda-secret"
+            -               
+              OrganizationName: !Ref OrganizationName
+              Environment: !Ref Environment
+              ServiceName: !Ref ServiceName
+      KmsKeyId: !GetAtt KMSkey.KeyId 
+      Tags: 
+        - Key: OrganizationName
+          Value:
+            Fn::Sub:
+              - "${OrganizationName}-${Environment}-${ServiceName}-logs-to-siem" 
+              - 
+                OrganizationName: !Ref OrganizationName
+                Environment: !Ref Environment
+                ServiceName: !Ref ServiceName
+        - Key: tech-team-email
+          Value: !Ref TeamContactEmail
+        - Key: team-contact-email
+          Value: !Ref TeamContactEmail
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: 
+        Fn::Sub: 
+          - "send-${OrganizationName}-${Environment}-${ServiceName}-logs-to-siem"
+          - 
+            OrganizationName: !Ref OrganizationName
+            Environment: !Ref Environment
+            ServiceName: !Ref ServiceName
+      Description: 
+        Fn::Sub:
+          - "This lambda is used for forwarding ${ServiceName} logs to SIEM"
+          - ServiceName: !Ref ServiceName 
+      MemorySize: 256
+      Timeout: 900
+      Handler: lambda_function.lambda_handler
+      Role: !Ref LambdaFunctionRoleArn
+      Code:
+        S3Bucket: "dev-log-consumer-cloudsecops-resources"
+        S3Key:  
+          Fn::Sub:
+            - "${ServiceName}/lambdaresources.zip"
+            -
+              ServiceName: !Ref ServiceName
+      Runtime: !Ref FunctionRuntime
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref SecurityGroupId
+        SubnetIds:
+          - !Select [0, !Ref VPCSubnetIdList]
+          - !Select [1, !Ref VPCSubnetIdList]
+          - !Select [2, !Ref VPCSubnetIdList]
+      KmsKeyArn: !GetAtt KMSkey.Arn
+      Environment:
+        Variables:
+          SPLUNK_TOKEN_SECRET: 
+            Fn::Sub: 
+            # ver se não pode virar getatt
+              - "${OrganizationName}-${Environment}-${ServiceName}-logs-lambda-secret"
+              - 
+                OrganizationName: !Ref OrganizationName
+                Environment: !Ref Environment
+                ServiceName: !Ref ServiceName
+          SPLUNK_URL: !Ref SplunkUrl
+      Tags:
+        - Key: OrganizationName
+          Value:
+            Fn::Sub:
+              - "${OrganizationName}-${Environment}-${ServiceName}-logs-to-siem" 
+              - 
+                OrganizationName: !Ref OrganizationName
+                Environment: !Ref Environment
+                ServiceName: !Ref ServiceName
+        - Key: tech-team-email
+          Value: !Ref TeamContactEmail
+        - Key: team-contact-email
+          Value: !Ref TeamContactEmail
+    DependsOn: 
+      - Secret
+  LambdaTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties: 
+      FunctionName: !GetAtt LambdaFunction.Arn
+      EventSourceArn: !GetAtt ConsumerQueueSQS.Arn
+      Enabled: true 
+
+  LambdaSQSPermission:
+    Type: AWS::Lambda::Permission
+    Properties:  
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt LambdaFunction.Arn
+      Principal: sqs.amazonaws.com
+      SourceArn: !GetAtt ConsumerQueueSQS.Arn
+      SourceAccount: !Sub ${AWS::AccountId}
+
+      
+  # Import S3 Step   
+  # Please before uncomenting the following lines, make sure to execute the import step in aws cloudformation console: 
+  # https://aws.amazon.com/pt/premiumsupport/knowledge-center/cloudformation-s3-notification-config/
+
+  # Change this for the trail bucket name (i.e aws-controltower-logs-<account_id>-<region>)
+  # After adding trail bucket to the imported template, update stack with notification config: 
+
+  # NotificationS3Bucket:
+  #   Type: AWS::S3::Bucket
+  #   DeletionPolicy: Retain
+  #   Properties:
+  #     BucketName: !Ref LogingBucketName
+  #     NotificationConfiguration:
+  #       QueueConfigurations:
+  #           - Event: s3:ObjectCreated:*
+  #             Queue: !GetAtt ConsumerQueueSQS.Arn
+  
+
