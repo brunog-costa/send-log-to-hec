@@ -1,0 +1,46 @@
+[
+    {
+      "ParameterKey": "LambdaFunctionRoleArn",
+      "ParameterValue": "arn:aws:iam::account-id:role/role-name"
+    },
+    {
+      "ParameterKey": "SecurityGroupId",
+      "ParameterValue": "sg-id"
+    },
+    {
+      "ParameterKey": "VPCSubnetIdList",
+      "ParameterValue": "subnet-aza, subnet-azb, subnet-azc"
+    },
+    {
+      "ParameterKey": "FunctionRuntime",
+      "ParameterValue": "python3.9"
+    },
+    {
+      "ParameterKey": "SplunkUrl",
+      "ParameterValue": "https://<endpoint>:8088/services/collector/event"
+    },
+    {
+      "ParameterKey": "TeamContactEmail",
+      "ParameterValue": ""
+    },
+    {
+      "ParameterKey": "ServiceName",
+      "ParameterValue": "service name to be monitored"
+    },
+    {
+      "ParameterKey": "OrganizationName",
+      "ParameterValue": "controltower | stackspot | landing-zone | aws"
+    },
+    {
+      "ParameterKey": "Environment",
+      "ParameterValue": "dev | hom | pro | too"
+    },
+    {
+      "ParameterKey": "LogingBucketName",
+      "ParameterValue": "ct-dev"
+    },
+    {
+      "ParameterKey": "DataClassification",
+      "ParameterValue": "internal | confidential"
+    }
+  ]
